@@ -1,0 +1,75 @@
+#!/bin/bash
+
+# Function to get the current proven block number
+get_block() {
+    curl -s -X POST -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","method":"node_getL2Tips","params":[],"id":1}' \
+        http://localhost:8080 | jq -r ".result.proven.number"
+}
+
+# Function to start the node in a screen session
+start_node() {
+    screen -dmS aztec bash -c "
+        aztec start --node --archiver --sequencer \
+        --network alpha-testnet \
+        --l1-rpc-urls '$1' \
+        --l1-consensus-host-urls '$2' \
+        --sequencer.validatorPrivateKey '$3' \
+        --sequencer.coinbase '$4' \
+        --p2p.p2pIp '$5'
+    "
+    echo "Node starting in screen session 'aztec'."
+}
+
+# Check if node is running
+if screen -ls | grep -q '\.aztec'; then
+    echo "Aztec node is running."
+    before=$(get_block)
+    echo "Current proven block: $before"
+    read -p "Do you want to update the RPC URLs? [y/N]: " ans
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+        read -p "Enter new L1 execution RPC URL: " L1_RPC
+        read -p "Enter new L1 consensus (beacon) RPC URL: " BEACON_RPC
+        read -p "Enter validator private key: " PRIV_KEY
+        read -p "Enter wallet address: " WALLET
+        read -p "Enter public IP: " P2P_IP
+
+        # Stop the node
+        screen -XS aztec quit
+        sleep 2
+
+        # Start the node with new RPCs
+        start_node "$L1_RPC" "$BEACON_RPC" "$PRIV_KEY" "$WALLET" "$P2P_IP"
+
+        echo "Node restarted with new RPCs. Waiting 20 seconds for sync..."
+        sleep 20
+        after=$(get_block)
+        echo "New proven block: $after"
+
+        if [[ "$after" -ge "$before" ]]; then
+            echo "✅ Node continued syncing from previous state."
+        else
+            echo "⚠️  Node started from scratch or lost progress!"
+        fi
+    else
+        echo "No update performed. Exiting."
+    fi
+else
+    echo "Aztec node is NOT running in a screen session named 'aztec'."
+    read -p "Do you want to start a new node? [y/N]: " start_ans
+    if [[ "$start_ans" =~ ^[Yy]$ ]]; then
+        read -p "Enter L1 execution RPC URL: " L1_RPC
+        read -p "Enter L1 consensus (beacon) RPC URL: " BEACON_RPC
+        read -p "Enter validator private key: " PRIV_KEY
+        read -p "Enter wallet address: " WALLET
+        read -p "Enter public IP: " P2P_IP
+
+        start_node "$L1_RPC" "$BEACON_RPC" "$PRIV_KEY" "$WALLET" "$P2P_IP"
+        echo "Node started. Waiting 20 seconds for sync..."
+        sleep 20
+        after=$(get_block)
+        echo "Current proven block: $after"
+    else
+        echo "No node started."
+    fi
+fi

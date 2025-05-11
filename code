@@ -1,95 +1,72 @@
 #!/bin/bash
 
-# Dependency check
-check_dependencies() {
-    local missing=()
-    command -v aztec >/dev/null 2>&1 || missing+=("aztec")
-    command -v screen >/dev/null 2>&1 || missing+=("screen")
+SCREEN_NAME="aztec"
+DOCKER_IMAGE="aztecprotocol/aztec"
+
+check_node_running() {
+    # Check for screen session
+    screen -ls | grep -q "\.$SCREEN_NAME" && return 0
     
-    if [ ${#missing[@]} -ne 0 ]; then
-        echo "Missing dependencies:"
-        for dep in "${missing[@]}"; do
-            case $dep in
-                "aztec") echo "- Aztec client: Install from https://docs.aztec.network/quickstart" ;;
-                "screen") echo "- screen: Install with 'sudo apt-get install screen'" ;;
-            esac
-        done
-        exit 1
-    fi
+    # Check for Docker container
+    docker ps -q --filter ancestor="$DOCKER_IMAGE" >/dev/null 2>&1 && return 0
+    
+    return 1
 }
 
-# Node status check
-is_node_running() {
-    pgrep -f "aztec.*start" >/dev/null || \
-    (command -v docker >/dev/null && docker ps --filter ancestor=aztecprotocol/aztec | grep -q aztec)
+get_inputs() {
+    read -p "Enter L1 execution RPC URL: " ETHEREUM_HOSTS
+    read -p "Enter L1 consensus (beacon) RPC URL: " L1_CONSENSUS_HOST_URLS
+    read -p "Enter your validator private key: " VALIDATOR_PRIVATE_KEY
+    read -p "Enter your wallet address: " WALLET_ADDRESS
+    read -p "Enter your public IP: " P2P_IP
 }
 
-# Force stop all node processes
 stop_node() {
-    echo "Stopping node processes..."
-    pkill -f "aztec.*start" || true
+    echo "Stopping existing node processes..."
+    # Stop screen session
+    screen -XS $SCREEN_NAME quit 2>/dev/null
     
-    if command -v docker >/dev/null; then
-        echo "Cleaning up Docker containers..."
-        docker stop $(docker ps -q --filter ancestor=aztecprotocol/aztec) 2>/dev/null || true
-        docker rm $(docker ps -a -q --filter ancestor=aztecprotocol/aztec) 2>/dev/null || true
-    fi
+    # Stop Docker containers
+    docker stop $(docker ps -q --filter ancestor="$DOCKER_IMAGE") 2>/dev/null
+    docker rm $(docker ps -a -q --filter ancestor="$DOCKER_IMAGE") 2>/dev/null
+    sleep 2
 }
 
-# Main script
-check_dependencies
-
-if is_node_running; then
-    echo "Aztec node is running"
-    read -p "Update RPC configuration? [y/N]: " ans
+if check_node_running; then
+    echo "Aztec node is running (either in screen or Docker)."
+    read -p "Do you want to update your RPC URLs and restart the node? (y/n): " update_rpc
     
-    if [[ "$ans" =~ ^[Yy]$ ]]; then
-        # Get current block before restart
-        current_block=$(curl -s -X POST -H 'Content-Type: application/json' \
-            -d '{"jsonrpc":"2.0","method":"node_getL2Tips","id":1}' \
-            http://localhost:8080 | jq -r '.result.proven.number')
-        
+    if [[ "$update_rpc" == "y" ]]; then
+        get_inputs
         stop_node
         
-        # Get new configuration
-        read -p "New L1 RPC URL: " l1_rpc
-        read -p "New Beacon RPC URL: " beacon_rpc
-        
-        # Start new session with explicit logging
-        echo "Starting node with new configuration..."
-        screen -dmS aztec bash -c '
-            aztec start --node --archiver --sequencer \
-                --network alpha-testnet \
-                --l1-rpc-urls "'"$l1_rpc"'" \
-                --l1-consensus-host-urls "'"$beacon_rpc"'" \
-                --data-directory ~/.aztec/alpha-testnet/data \
-                2>&1 | tee ~/.aztec/update.log
-        '
-        
-        # Verify restart
-        echo -n "Waiting for node initialization"
-        for i in {1..15}; do
-            sleep 2
-            is_node_running && break
-            echo -n "."
-        done
-        
-        if is_node_running; then
-            new_block=$(curl -s -X POST -H 'Content-Type: application/json' \
-                -d '{"jsonrpc":"2.0","method":"node_getL2Tips","id":1}' \
-                http://localhost:8080 | jq -r '.result.proven.number')
+        echo "Restarting node..."
+        screen -dmS $SCREEN_NAME bash -c \
+            "aztec start --node --archiver --sequencer \
+            --network alpha-testnet \
+            --l1-rpc-urls \"$ETHEREUM_HOSTS\" \
+            --l1-consensus-host-urls \"$L1_CONSENSUS_HOST_URLS\" \
+            --sequencer.validatorPrivateKey \"$VALIDATOR_PRIVATE_KEY\" \
+            --sequencer.coinbase \"$WALLET_ADDRESS\" \
+            --p2p.p2pIp \"$P2P_IP\""
             
-            if [ "$new_block" -ge "$current_block" ]; then
-                echo -e "\n✅ Node resumed at block $new_block (was $current_block)"
-            else
-                echo -e "\n⚠️  Node restarted from block $new_block (was $current_block)"
-            fi
-        else
-            echo -e "\n❌ Failed to start node! Check logs: ~/.aztec/update.log"
-        fi
+        echo "Node restarted. Attach with: screen -r $SCREEN_NAME"
     else
-        echo "Update canceled"
+        echo "No changes made. Node continues running."
     fi
 else
-    echo "Aztec node is NOT running"
+    echo "Aztec node is NOT running in either screen or Docker."
+    get_inputs
+    
+    echo "Starting new node..."
+    screen -dmS $SCREEN_NAME bash -c \
+        "aztec start --node --archiver --sequencer \
+        --network alpha-testnet \
+        --l1-rpc-urls \"$ETHEREUM_HOSTS\" \
+        --l1-consensus-host-urls \"$L1_CONSENSUS_HOST_URLS\" \
+        --sequencer.validatorPrivateKey \"$VALIDATOR_PRIVATE_KEY\" \
+        --sequencer.coinbase \"$WALLET_ADDRESS\" \
+        --p2p.p2pIp \"$P2P_IP\""
+        
+    echo "Node started in screen session. Attach with: screen -r $SCREEN_NAME"
 fi
